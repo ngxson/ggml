@@ -66,6 +66,10 @@
 #include "ggml-kompute.h"
 #endif
 
+#ifdef GGML_USE_WGPU
+#include "ggml-wgpu.h"
+#endif
+
 // disable C++17 deprecation warning for std::codecvt_utf8
 #if defined(__clang__)
 #    pragma clang diagnostic push
@@ -182,6 +186,9 @@ struct ggml_backend_registry {
 #endif
 #ifdef GGML_USE_CPU
         register_backend(ggml_backend_cpu_reg());
+#endif
+#ifdef GGML_USE_WGPU
+        register_backend(ggml_backend_wgpu_reg());
 #endif
     }
 

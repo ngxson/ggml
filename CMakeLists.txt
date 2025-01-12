@@ -185,6 +185,8 @@ option(GGML_OPENCL_PROFILING                "ggml: use OpenCL profiling (increas
 option(GGML_OPENCL_EMBED_KERNELS            "ggml: embed kernels"                             ON)
 option(GGML_OPENCL_USE_ADRENO_KERNELS       "ggml: use optimized kernels for Adreno"          ON)
 
+option(GGML_WGPU                            "ggml: use WebGPU"                                OFF)
+
 # extra artifacts
 option(GGML_BUILD_TESTS    "ggml: build tests"    ${GGML_STANDALONE})
 option(GGML_BUILD_EXAMPLES "ggml: build examples" ${GGML_STANDALONE})
@@ -243,12 +245,16 @@ set(GGML_PUBLIC_HEADERS
     include/ggml-metal.h
     include/ggml-rpc.h
     include/ggml-sycl.h
-    include/ggml-vulkan.h)
+    include/ggml-vulkan.h
+    include/ggml-wgpu.h)
 
 set_target_properties(ggml PROPERTIES PUBLIC_HEADER "${GGML_PUBLIC_HEADERS}")
 #if (GGML_METAL)
 #    set_target_properties(ggml PROPERTIES RESOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-metal.metal")
 #endif()
+if (GGML_WGPU)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-wgpu)
+endif()
 install(TARGETS ggml LIBRARY PUBLIC_HEADER)
 install(TARGETS ggml-base LIBRARY)
 
@@ -260,3 +266,12 @@ if (GGML_STANDALONE)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ggml.pc
         DESTINATION share/pkgconfig)
 endif()
+
+
+
+
+add_executable(wgpu_test "_dev_wgpu/wgpu_test.cpp")
+target_link_libraries(wgpu_test PRIVATE ggml)
+target_link_libraries(wgpu_test PRIVATE ggml-wgpu)
+set_target_properties(wgpu_test PROPERTIES SUFFIX ".html")
+target_link_options(wgpu_test PRIVATE "-sUSE_WEBGPU=1" "-sUSE_GLFW=3" "-sALLOW_MEMORY_GROWTH=1" "-sASYNCIFY=1")
