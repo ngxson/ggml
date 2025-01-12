@@ -16,7 +16,20 @@
 #define BUF_BASE  0x1000
 #define UNUSED GGML_UNUSED
 
+#define WGPU_ENABLE_LOG_TRACE
+
+#ifdef WGPU_ENABLE_LOG_TRACE
+// trace
+#define LOGT(...) printf(__VA_ARGS__)
+#else
+#define LOGT(...) // do nothing
+#endif
+
 #define LOGD(...) printf(__VA_ARGS__)
+
+size_t wgpu_tensor_get_nbytes(const ggml_tensor * tensor) {
+    return GGML_PAD(ggml_nbytes(tensor), BUF_ALIGN);
+}
 
 struct ggml_wgpu_context;
 struct ggml_wgpu_buffer_context;
@@ -167,13 +180,13 @@ struct ggml_wgpu_buffer_context {
     std::string  label;
 
     ggml_wgpu_buffer_context(ggml_wgpu_buffer_type_context * _ctx, size_t aligned_size): size(aligned_size), ctx(_ctx) {
-        label = std::string("storage_buffer_") + std::to_string(buff_id++);
-        LOGD("%s: create with size=%ld\n", label.c_str(), size);
+        label = std::string("wgpu_buf_") + std::to_string(buff_id++);
+        LOGT("%s: [constructor] buf=%s size=%ld\n", __func__, label.c_str(), size);
         init_buf();
     }
 
     ~ggml_wgpu_buffer_context() {
-        LOGD("%s: free\n", label.c_str());
+        LOGT("%s: free\n", label.c_str());
         buffer.unmap();
     }
 
@@ -190,7 +203,8 @@ struct ggml_wgpu_buffer_context {
     }
     
     void init_tensor(const ggml_tensor * tensor) {
-        LOGD("%s: %s, init to offset %ld\n", label.c_str(), tensor->name, next_free_ptr);
+        LOGT("%s: %s, init to offset %ld\n", label.c_str(), tensor->name, next_free_ptr);
+        next_free_ptr += wgpu_tensor_get_nbytes(tensor);
     }
 
     void write_tensor(const ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
@@ -245,7 +259,7 @@ struct ggml_wgpu_buffer_context {
 // backend buffer interface
 
 static void ggml_backend_wgpu_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    LOGD("%s\n", __func__);
+    LOGT("%s\n", __func__);
     ggml_wgpu_buffer_context * buf_ctx = (ggml_wgpu_buffer_context *)buffer->context;
     delete buf_ctx;
 }
@@ -259,8 +273,8 @@ static void * ggml_backend_wgpu_buffer_get_base(ggml_backend_buffer_t buffer) {
 
 static void ggml_backend_wgpu_buffer_init_tensor(ggml_backend_buffer_t buffer,
                                      ggml_tensor * tensor) {
-    LOGD("%s: %s\n", __func__, tensor->name);
     ggml_wgpu_buffer_context * buf_ctx = (ggml_wgpu_buffer_context *)buffer->context;
+    LOGT("%s: %s buf=%s\n", __func__, tensor->name, buf_ctx->label.c_str());
     buf_ctx->init_tensor(tensor);
 }
 
@@ -268,8 +282,8 @@ static void ggml_backend_wgpu_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                                 ggml_tensor * tensor,
                                                 const void * data, size_t offset,
                                                 size_t size) {
-    LOGD("%s: %s off=%ld size=%ld\n", __func__, tensor->name, offset, size);
     ggml_wgpu_buffer_context * buf_ctx = (ggml_wgpu_buffer_context *)buffer->context;
+    LOGT("%s: buf=%s tensor=%s off=%ld size=%ld\n", __func__, buf_ctx->label.c_str(), tensor->name, offset, size);
     buf_ctx->write_tensor(tensor, data, offset, size);
 }
 
@@ -277,18 +291,18 @@ static void ggml_backend_wgpu_buffer_get_tensor(ggml_backend_buffer_t buffer,
                                                 const ggml_tensor *tensor,
                                                 void *data, size_t offset,
                                                 size_t size) {
-    LOGD("%s: %s off=%ld size=%ld\n", __func__, tensor->name, offset, size);
     ggml_wgpu_buffer_context * buf_ctx = (ggml_wgpu_buffer_context *)buffer->context;
+    LOGT("%s: buf=%s tensor=%s off=%ld size=%ld\n", __func__, buf_ctx->label.c_str(), tensor->name, offset, size);
     buf_ctx->read_tensor(tensor, data, offset, size);
 }
 
 static void ggml_backend_wgpu_buffer_clear(ggml_backend_buffer_t buffer,
                                            uint8_t value) {
-    LOGD("%s: %d\n", __func__, value);
+    LOGT("%s: %d\n", __func__, value);
 }
 
 static void ggml_backend_wgpu_buffer_reset(ggml_backend_buffer_t buffer) {
-    LOGD("%s\n", __func__);
+    LOGT("%s\n", __func__);
 }
 
 static struct ggml_backend_buffer_i ggml_backend_wgpu_buffer_interface = {
@@ -313,10 +327,10 @@ static const char * ggml_backend_wgpu_buffer_type_name(ggml_backend_buffer_type_
 }
 
 static ggml_backend_buffer_t ggml_backend_wgpu_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
-    LOGD("%s: %ld\n", __func__, size);
     ggml_wgpu_buffer_type_context * buft_ctx = (ggml_wgpu_buffer_type_context *)buft->context;
     size_t padded_size = GGML_PAD(size, BUF_ALIGN);
     ggml_wgpu_buffer_context * ctx = new ggml_wgpu_buffer_context(buft_ctx, padded_size);
+    LOGT("%s: size=%ld buf=%s\n", __func__, size, ctx->label.c_str());
     return ggml_backend_buffer_init(
         /* .buft      = */ buft,
         /* .interface = */ ggml_backend_wgpu_buffer_interface,
@@ -333,11 +347,12 @@ static size_t ggml_backend_wgpu_buffer_type_get_alignment(ggml_backend_buffer_ty
 static size_t ggml_backend_wgpu_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const ggml_tensor * tensor) {
     UNUSED(buft);
     size_t size = GGML_PAD(ggml_nbytes(tensor), BUF_ALIGN);
-    //LOGD("%s: %ld\n", __func__, size);
+    // LOGT("%s: %ld\n", __func__, size);
     return size;
 }
 
 static bool ggml_backend_wgpu_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
+    LOGT("%s\n", __func__);
     UNUSED(buft);
     return false;
 }
@@ -367,7 +382,7 @@ static void ggml_backend_wgpu_free(ggml_backend_t backend) {
 }
 
 static ggml_backend_buffer_type_t ggml_backend_wgpu_get_default_buffer_type(ggml_backend_dev_t dev) {
-    LOGD("%s\n", __func__);
+    LOGT("%s\n", __func__);
     ggml_wgpu_context * ctx = (ggml_wgpu_context *)dev->context;
     if (ctx->buft == nullptr) {
         ctx->buft = new ggml_backend_buffer_type{
@@ -380,24 +395,36 @@ static ggml_backend_buffer_type_t ggml_backend_wgpu_get_default_buffer_type(ggml
 }
 
 static void ggml_backend_wgpu_synchronize(ggml_backend_t backend) {
-    LOGD("%s\n", __func__);
+    LOGT("%s\n", __func__);
     UNUSED(backend);
 }
 
+ggml_wgpu_buffer_context * wgpu_tensor_get_buf_ctx(const ggml_tensor * t) {
+    ggml_backend_buffer_t buf = t->view_src ? t->view_src->buffer : t->buffer;
+    return (ggml_wgpu_buffer_context *)buf->context;
+}
+
+const char * wgpu_tensor_get_buf_label(const ggml_tensor * t) {
+    ggml_wgpu_buffer_context * buf_ctx = wgpu_tensor_get_buf_ctx(t);
+    return buf_ctx->label.c_str();
+}
+
+wgpu::Buffer wgpu_tensor_get_buffer(const ggml_tensor * t) {
+    ggml_wgpu_buffer_context * buf_ctx = wgpu_tensor_get_buf_ctx(t);
+    return buf_ctx->buffer;
+}
+
+size_t wgpu_tensor_get_offset(const ggml_tensor * t) {
+    return (size_t)t->data - BUF_BASE;
+}
+
 bool ggml_wgpu_compute_forward(ggml_wgpu_context * ctx, struct ggml_tensor * tensor) {
-    LOGD("%s: %s op=%s\n", __func__, tensor->name, ggml_op_name(tensor->op));
+    LOGT("%s: %s op=%s\n", __func__, tensor->name, ggml_op_name(tensor->op));
 
     wgpu::ComputePipeline compPipeline = ctx->pipeline_op[tensor->op];
 
     const ggml_tensor * src0 = tensor->src[0];
     const ggml_tensor * src1 = tensor->src[1];
-    auto get_wgpu_buffer = [](const ggml_tensor * t) {
-        ggml_backend_buffer_t buf = t->view_src ? t->view_src->buffer : t->buffer;
-        return ((ggml_wgpu_buffer_context *)buf->context)->buffer;
-    };
-    auto get_wgpu_offset = [](const ggml_tensor * t) {
-        return (size_t)t->data - BUF_BASE;
-    };
 
     // ctx->tensor_params_host
     ctx->queue.writeBuffer(ctx->buf_tensor_params, 0, &ctx->tensor_params_host, sizeof(ggml_wgpu_tensor_params));
@@ -406,28 +433,28 @@ bool ggml_wgpu_compute_forward(ggml_wgpu_context * ctx, struct ggml_tensor * ten
     wgpu::BindGroupEntry bgEntries[4];
     {
         bgEntries[0].binding = 0;
-        bgEntries[0].buffer = get_wgpu_buffer(src0);
-        bgEntries[0].offset = get_wgpu_offset(src0);
-        bgEntries[0].size = GGML_PAD(ggml_nbytes(src0), BUF_ALIGN);
+        bgEntries[0].buffer = wgpu_tensor_get_buffer(src0);
+        bgEntries[0].offset = wgpu_tensor_get_offset(src0);
+        bgEntries[0].size = wgpu_tensor_get_nbytes(src0);
 
         bgEntries[1].binding = 1;
-        bgEntries[1].buffer = get_wgpu_buffer(src1);
-        bgEntries[1].offset = get_wgpu_offset(src1);
-        bgEntries[1].size = GGML_PAD(ggml_nbytes(src1), BUF_ALIGN);
+        bgEntries[1].buffer = wgpu_tensor_get_buffer(src1);
+        bgEntries[1].offset = wgpu_tensor_get_offset(src1);
+        bgEntries[1].size = wgpu_tensor_get_nbytes(src1);
 
         bgEntries[2].binding = 2;
-        bgEntries[2].buffer = get_wgpu_buffer(tensor);
-        bgEntries[2].offset = get_wgpu_offset(tensor);
-        bgEntries[2].size = GGML_PAD(ggml_nbytes(tensor), BUF_ALIGN);
+        bgEntries[2].buffer = wgpu_tensor_get_buffer(tensor);
+        bgEntries[2].offset = wgpu_tensor_get_offset(tensor);
+        bgEntries[2].size = wgpu_tensor_get_nbytes(tensor);
 
         bgEntries[3].binding = 3;
         bgEntries[3].buffer = ctx->buf_tensor_params;
         bgEntries[3].offset = 0;
         bgEntries[3].size = sizeof(ggml_wgpu_tensor_params);
 
-        LOGD("%s: src0=%s off=%llu\n", __func__, src0->name, bgEntries[0].offset);
-        LOGD("%s: src1=%s off=%llu\n", __func__, src1->name, bgEntries[1].offset);
-        LOGD("%s: dest=%s off=%llu\n", __func__, tensor->name, bgEntries[2].offset);
+        LOGT("%s: src0=%s buf=%s off=%llu\n", __func__, src0->name, wgpu_tensor_get_buf_label(src0), bgEntries[0].offset);
+        LOGT("%s: src1=%s buf=%s off=%llu\n", __func__, src1->name, wgpu_tensor_get_buf_label(src1), bgEntries[1].offset);
+        LOGT("%s: dest=%s buf=%s off=%llu\n", __func__, tensor->name, wgpu_tensor_get_buf_label(tensor), bgEntries[2].offset);
     }
     wgpu::BindGroupDescriptor bgDesc = wgpu::Default;
     {
@@ -480,42 +507,22 @@ static ggml_status ggml_backend_wgpu_graph_compute(ggml_backend_t backend, ggml_
 }
 
 static bool ggml_backend_wgpu_supports_op(ggml_backend_dev_t backend, const struct ggml_tensor * op) {
+    LOGT("%s\n", __func__);
     UNUSED(backend);
     const ggml_wgpu_shader * shader = ggml_wgpu_get_shader(op->op);
     return shader != nullptr;
 }
 
 static bool ggml_backend_wgpu_supports_buft(ggml_backend_dev_t backend, ggml_backend_buffer_type_t buft) {
+    LOGT("%s\n", __func__);
     return buft->iface.get_name == ggml_backend_wgpu_buffer_type_name;
 }
 
 static bool ggml_backend_wgpu_offload_op(ggml_backend_dev_t backend, const ggml_tensor * op) {
+    LOGT("%s\n", __func__);
     return true;
     GGML_UNUSED(backend);
 }
-
-// static ggml_backend_i ggml_backend_wgpu_interface = {
-//     /* .get_name                = */ ggml_backend_wgpu_get_name,
-//     /* .free                    = */ ggml_backend_wgpu_free,
-//     /* .get_default_buffer_type = */ ggml_backend_wgpu_get_default_buffer_type,
-//     /* .set_tensor_async        = */ NULL, // ggml_backend_wgpu_set_tensor_async,
-//     /* .get_tensor_async        = */ NULL, // ggml_backend_wgpu_get_tensor_async,
-//     /* .cpy_tensor_async        = */ NULL,
-//     /* .synchronize             = */ ggml_backend_wgpu_synchronize,
-//     /* .graph_plan_create       = */ NULL,
-//     /* .graph_plan_free         = */ NULL,
-//     /* .graph_plan_update       = */ NULL,
-//     /* .graph_plan_compute      = */ NULL,
-//     /* .graph_compute           = */ ggml_backend_wgpu_graph_compute,
-//     /* .supports_op             = */ ggml_backend_wgpu_supports_op,
-//     /* .supports_buft           = */ ggml_backend_wgpu_supports_buft,
-//     /* .offload_op              = */ ggml_backend_wgpu_offload_op,
-//     /* .event_new               = */ NULL,
-//     /* .event_free              = */ NULL,
-//     /* .event_record            = */ NULL,
-//     /* .event_wait              = */ NULL,
-//     /* .event_synchronize       = */ NULL,
-// };
 
 static struct ggml_backend_i ggml_backend_wgpu_interface = {
     /* .get_name                = */ ggml_backend_wgpu_get_name,
@@ -534,6 +541,7 @@ static struct ggml_backend_i ggml_backend_wgpu_interface = {
 };
 
 static void ggml_backend_wgpu_device_get_props(ggml_backend_dev_t dev, struct ggml_backend_dev_props * props) {
+    LOGT("%s\n", __func__);
     props->name        = "WebGPU";
     props->description = "WebGPU";
     props->type        = GGML_BACKEND_DEVICE_TYPE_ACCEL;
@@ -548,6 +556,7 @@ static void ggml_backend_wgpu_device_get_props(ggml_backend_dev_t dev, struct gg
 }
 
 GGML_API ggml_backend_t ggml_backend_wgpu_device_init_backend(ggml_backend_dev_t dev, const char * params) {
+    LOGT("%s\n", __func__);
     GGML_UNUSED(params);
     ggml_wgpu_context * ctx = new ggml_wgpu_context;
     static const char * guid_str = "__ggml_webgpu :)";
@@ -561,6 +570,7 @@ GGML_API ggml_backend_t ggml_backend_wgpu_device_init_backend(ggml_backend_dev_t
 }
 
 GGML_API ggml_backend_t ggml_backend_wgpu_init(void) {
+    LOGT("%s\n", __func__);
     return ggml_backend_wgpu_device_init_backend(ggml_backend_wgpu_add_device(), nullptr);
 }
 

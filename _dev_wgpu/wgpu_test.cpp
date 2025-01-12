@@ -3,6 +3,7 @@
 #include "ggml-backend.h"
 
 #include "ggml-wgpu.h"
+#include "ggml-cpu.h"
 
 #include <cassert>
 #include <cmath>
@@ -35,6 +36,16 @@ float demo_mat_B[rows_B * cols_B] = {
     -1, 5
 };
 
+/**
+ * Expected result:
+ * [
+ *  3.00 14.00
+ *  -2.00 -6.00
+ *  13.00 2.10
+ *  7.00 -1.00
+ * ]
+ */
+
 struct simple_model {
     struct ggml_tensor * a;
     struct ggml_tensor * b;
@@ -45,6 +56,8 @@ struct simple_model {
     simple_model() {
         printf("%s: using webgpu backend\n", __func__);
         backend = ggml_backend_wgpu_init();
+        //backend = ggml_backend_cpu_init();
+        //ggml_backend_cpu_set_n_threads(backend, 1);
         if (!backend) {
             printf("%s: ggml_backend_wgpu_init() failed\n", __func__);
         }
@@ -61,10 +74,10 @@ struct simple_model {
         ggml_set_name(a, "tensor_a");
         ggml_set_name(b, "tensor_b");
 
-        for (int i = 0; i < 64; i++) {
-            auto t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_B, rows_B);
-            ggml_format_name(t, "test_%d", i);
-        }
+        // for (int i = 0; i < 64; i++) {
+        //     auto t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_B, rows_B);
+        //     ggml_format_name(t, "test_%d", i);
+        // }
 
         buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
         ggml_backend_tensor_set(a, demo_mat_A, 0, ggml_nbytes(a));
@@ -83,10 +96,10 @@ struct ggml_cgraph * build_graph(const simple_model & model) {
     struct ggml_context * ctx0 = ggml_init(params0);
     struct ggml_cgraph  * gf = ggml_new_graph(ctx0);
     struct ggml_tensor * result = ggml_add(ctx0, model.a, model.b);
-    result = ggml_div(ctx0, result, model.b);
-    result = ggml_div(ctx0, result, model.b);
-    result = ggml_div(ctx0, result, model.b);
-    result = ggml_div(ctx0, result, model.b);
+    // result = ggml_div(ctx0, result, model.b);
+    // result = ggml_div(ctx0, result, model.b);
+    // result = ggml_div(ctx0, result, model.b);
+    // result = ggml_div(ctx0, result, model.b);
     ggml_build_forward_expand(gf, result);
     ggml_free(ctx0);
     return gf;

@@ -61,8 +61,8 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
     switch (op) {
         case GGML_OP_NONE: {
             static const ggml_wgpu_shader sh{
-                /* .name */ "kernel_none",
-                /* .code */ R"(
+                /* .name = */ "kernel_none",
+                /* .code = */ R"(
                     @compute
                     @workgroup_size(1)
                     fn kernel_none(@builtin(global_invocation_id) global_id: vec3<u32>) {}
@@ -75,8 +75,8 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
 
         case GGML_OP_DUP: {
             static const ggml_wgpu_shader sh{
-                /* .name */ "kernel_dup",
-                /* .code */ R"(
+                /* .name = */ "kernel_dup",
+                /* .code = */ R"(
                     @compute
                     @workgroup_size(1)
                     fn kernel_dup(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -89,8 +89,8 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
         }
         case GGML_OP_ADD: {
             static const ggml_wgpu_shader sh{
-                /* .name */ "kernel_add",
-                /* .code */ R"(
+                /* .name = */ "kernel_add",
+                /* .code = */ R"(
                     @compute
                     @workgroup_size(1)
                     fn kernel_add(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -109,8 +109,8 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
             return nullptr;
         case GGML_OP_DIV: {
             static const ggml_wgpu_shader sh{
-                /* .name */ "kernel_div",
-                /* .code */ R"(
+                /* .name = */ "kernel_div",
+                /* .code = */ R"(
                     @compute
                     @workgroup_size(1)
                     fn kernel_div(@builtin(global_invocation_id) global_id: vec3<u32>) {
