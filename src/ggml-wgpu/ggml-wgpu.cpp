@@ -53,18 +53,26 @@ size_t wgpu_tensor_get_nbytes(const ggml_tensor * tensor) {
 struct ggml_wgpu_context;
 struct ggml_wgpu_buffer_context;
 
+template <typename T>
+struct ggml_wgpu_pair {
+    T normal;
+    T inplace;
+};
+
 struct ggml_wgpu_context {
     wgpu::Instance        instance;
     wgpu::Adapter         adapter;
     wgpu::Device          device;
     //wgpu::SupportedLimits limits;
     wgpu::Queue           queue;
-    wgpu::ShaderModule    shader_module;
-    wgpu::BindGroupLayout bind_group_layout;
-    wgpu::PipelineLayout  pipeline_layout;
+
+    // pair of normal and inplace
+    ggml_wgpu_pair<wgpu::ShaderModule>    shader;
+    ggml_wgpu_pair<wgpu::BindGroupLayout> bgl;
 
     // one pipeline per kernel
     wgpu::ComputePipeline pipeline_op[GGML_OP_COUNT];
+    wgpu::ComputePipeline pipeline_inpl_op[GGML_OP_COUNT];
     wgpu::ComputePipeline pipeline_unary_op[GGML_UNARY_OP_COUNT];
 
     ggml_backend_buffer_type_t buft = nullptr;
@@ -85,67 +93,65 @@ struct ggml_wgpu_context {
         queue = device.getQueue();
 
         // init bind group layout
-        wgpu::BindGroupLayoutEntry bglEntries[4];
-        {
-            bglEntries[0].setDefault();
-            bglEntries[0].binding = 0;
-            bglEntries[0].visibility = wgpu::ShaderStage::Compute;
-            bglEntries[0].buffer.type = wgpu::BufferBindingType::Storage;
-            bglEntries[0].buffer.hasDynamicOffset = false;
-            bglEntries[0].buffer.minBindingSize = 0;
+        auto createBindGroupLayout = [](wgpu::Device & device, int n_tensors, const char * label) -> wgpu::BindGroupLayout {
+            wgpu::BindGroupLayoutEntry bglEntries[4];
+            {
+                for (int i = 0; i < n_tensors; i++) {
+                    bglEntries[i].setDefault();
+                    bglEntries[i].binding = i;
+                    bglEntries[i].visibility = wgpu::ShaderStage::Compute;
+                    bglEntries[i].buffer.type = wgpu::BufferBindingType::Storage;
+                    bglEntries[i].buffer.hasDynamicOffset = false;
+                    bglEntries[i].buffer.minBindingSize = 0;
+                }
 
-            bglEntries[1].setDefault();
-            bglEntries[1].binding = 1;
-            bglEntries[1].visibility = wgpu::ShaderStage::Compute;
-            bglEntries[1].buffer.type = wgpu::BufferBindingType::Storage;
-            bglEntries[1].buffer.hasDynamicOffset = false;
-            bglEntries[1].buffer.minBindingSize = 0;
-
-            bglEntries[2].setDefault();
-            bglEntries[2].binding = 2;
-            bglEntries[2].visibility = wgpu::ShaderStage::Compute;
-            bglEntries[2].buffer.type = wgpu::BufferBindingType::Storage;
-            bglEntries[2].buffer.hasDynamicOffset = false;
-            bglEntries[2].buffer.minBindingSize = 0;
-
-            bglEntries[3].setDefault();
-            bglEntries[3].binding = 3;
-            bglEntries[3].visibility = wgpu::ShaderStage::Compute;
-            bglEntries[3].buffer.type = wgpu::BufferBindingType::Uniform;
-            bglEntries[3].buffer.hasDynamicOffset = false;
-            bglEntries[3].buffer.minBindingSize = sizeof(ggml_wgpu_tensor_params);
-        }
-        wgpu::BindGroupLayoutDescriptor bglDesc = wgpu::Default;
-        {
-            bglDesc.label = "ggml-wgpu-bind-group-layout";
-            bglDesc.entryCount = 4;
-            bglDesc.entries = bglEntries;
+                int k = n_tensors;
+                bglEntries[k].setDefault();
+                bglEntries[k].binding = k;
+                bglEntries[k].visibility = wgpu::ShaderStage::Compute;
+                bglEntries[k].buffer.type = wgpu::BufferBindingType::Uniform;
+                bglEntries[k].buffer.hasDynamicOffset = false;
+                bglEntries[k].buffer.minBindingSize = sizeof(ggml_wgpu_tensor_params);
+            }
+            wgpu::BindGroupLayoutDescriptor bglDesc = wgpu::Default;
+            {
+                bglDesc.label = label;
+                bglDesc.entryCount = 4;
+                bglDesc.entries = bglEntries;
+            };
+            return device.createBindGroupLayout(bglDesc);
         };
-        bind_group_layout = device.createBindGroupLayout(bglDesc);
-        GGML_ASSERT(bind_group_layout && "cannot create BindGroupLayout");
+
+        bgl.normal  = createBindGroupLayout(device, 3, "wgpu_bind_group_layout_normal");
+        bgl.inplace = createBindGroupLayout(device, 2, "wgpu_bind_group_layout_inplace");
+        GGML_ASSERT(bgl.normal  && "cannot create wgpu_bind_group_layout_normal");
+        GGML_ASSERT(bgl.inplace && "cannot create wgpu_bind_group_layout_inplace");
 
         // load shaders
-        {
+        auto loadShader = [](wgpu::Device & device, bool inplace, const char * name) -> wgpu::ShaderModule {
             wgpu::ShaderModuleWGSLDescriptor wgslDesc = wgpu::Default;
-            auto code = new std::string(ggml_wgpu_build_shader_code()); // TODO: free
+            auto code = new std::string(ggml_wgpu_build_shader_code(inplace)); // TODO: free
             wgslDesc.code = code->c_str();
-            // LOGD("%s\n", wgslDesc.code);
+            // LOGT("%s\n", wgslDesc.code);
             wgpu::ShaderModuleDescriptor shaderModuleDescriptor;
             shaderModuleDescriptor.nextInChain = (const WGPUChainedStruct *) &wgslDesc;
-            shader_module = device.createShaderModule(shaderModuleDescriptor);
-            GGML_ASSERT(shader_module && "cannot create shaderModule");
-        }
+            wgpu::ShaderModule sm = device.createShaderModule(shaderModuleDescriptor);
+            GGML_ASSERT(sm && "cannot create shaderModule");
+            return sm;
+        };
+        shader.normal  = loadShader(device, false, "ggml_wgpu_shader");
+        shader.inplace = loadShader(device, true,  "ggml_wgpu_shader_inplace");
 
         // create pipeline from shader
-        {
+        auto createComputePipeline = [](wgpu::Device & device, wgpu::ShaderModule & shader_module, wgpu::BindGroupLayout & bgl, wgpu::ComputePipeline * pipeline_op) -> void {
             wgpu::PipelineLayoutDescriptor plDesc = wgpu::Default;
             {
                 plDesc.label = "ggml-wgpu-pipeline-layout";
                 plDesc.bindGroupLayoutCount = 1;
-                plDesc.bindGroupLayouts = (const WGPUBindGroupLayout *) &bind_group_layout;
+                plDesc.bindGroupLayouts = (const WGPUBindGroupLayout *) &bgl;
             };
-            pipeline_layout = device.createPipelineLayout(plDesc);
-            GGML_ASSERT(pipeline_layout);
+            wgpu::PipelineLayout pl = device.createPipelineLayout(plDesc);
+            GGML_ASSERT(pl);
 
             for (int i = 0; i < GGML_OP_COUNT; i++) {
                 const ggml_wgpu_shader * shader = ggml_wgpu_get_shader(static_cast<enum ggml_op>(i));
@@ -156,7 +162,7 @@ struct ggml_wgpu_context {
                 wgpu::ComputePipelineDescriptor cpDesc = wgpu::Default;
                 {
                     cpDesc.label = shader->name;
-                    cpDesc.layout = pipeline_layout;
+                    cpDesc.layout = pl;
                     wgpu::ProgrammableStageDescriptor psDesc = wgpu::Default;
                     {
                         psDesc.module = shader_module;
@@ -167,7 +173,9 @@ struct ggml_wgpu_context {
                 pipeline_op[i] = device.createComputePipeline(cpDesc);
                 GGML_ASSERT(pipeline_op[i] && "cannot create Pipeline");
             }
-        }
+        };
+        createComputePipeline(device, shader.normal,  bgl.normal,  pipeline_op);
+        createComputePipeline(device, shader.inplace, bgl.inplace, pipeline_inpl_op);
 
         // alloc buffer to store tensor params
         {
@@ -445,6 +453,14 @@ bool ggml_wgpu_compute_forward(ggml_wgpu_context * ctx, struct ggml_tensor * ten
 
     const ggml_tensor * src0 = tensor->src[0];
     const ggml_tensor * src1 = tensor->src[1];
+    const ggml_tensor * dest = tensor;
+
+    // inplace == same buffer && same offset
+    const bool inplace = dest->buffer == src0->buffer && dest->data == src0->data;
+
+    if (inplace) {
+        LOGT("%s: INPLACE!\n", __func__);
+    }
 
     // ctx->tensor_params_host
     ctx->queue.writeBuffer(ctx->buf_tensor_params, 0, &ctx->tensor_params_host, sizeof(ggml_wgpu_tensor_params));
@@ -452,36 +468,42 @@ bool ggml_wgpu_compute_forward(ggml_wgpu_context * ctx, struct ggml_tensor * ten
     // set bind group entry
     wgpu::BindGroupEntry bgEntries[4];
     {
-        bgEntries[0].binding = 0;
-        bgEntries[0].buffer = wgpu_tensor_get_buffer(src0);
-        bgEntries[0].offset = wgpu_tensor_get_offset(src0);
-        bgEntries[0].size = wgpu_tensor_get_nbytes(src0);
+        int i = 0;
+        bgEntries[i].binding = i;
+        bgEntries[i].buffer  = wgpu_tensor_get_buffer(src0);
+        bgEntries[i].offset  = wgpu_tensor_get_offset(src0);
+        bgEntries[i].size    = wgpu_tensor_get_nbytes(src0);
+        ++i;
 
-        bgEntries[1].binding = 1;
-        bgEntries[1].buffer = wgpu_tensor_get_buffer(src1);
-        bgEntries[1].offset = wgpu_tensor_get_offset(src1);
-        bgEntries[1].size = wgpu_tensor_get_nbytes(src1);
+        bgEntries[i].binding = i;
+        bgEntries[i].buffer  = wgpu_tensor_get_buffer(src1);
+        bgEntries[i].offset  = wgpu_tensor_get_offset(src1);
+        bgEntries[i].size    = wgpu_tensor_get_nbytes(src1);
+        ++i;
 
-        bgEntries[2].binding = 2;
-        bgEntries[2].buffer = wgpu_tensor_get_buffer(tensor);
-        bgEntries[2].offset = wgpu_tensor_get_offset(tensor);
-        bgEntries[2].size = wgpu_tensor_get_nbytes(tensor);
+        if (!inplace) {
+            bgEntries[i].binding = i;
+            bgEntries[i].buffer  = wgpu_tensor_get_buffer(dest);
+            bgEntries[i].offset  = wgpu_tensor_get_offset(dest);
+            bgEntries[i].size    = wgpu_tensor_get_nbytes(dest);
+            ++i;
+        }
 
-        bgEntries[3].binding = 3;
-        bgEntries[3].buffer = ctx->buf_tensor_params;
-        bgEntries[3].offset = 0;
-        bgEntries[3].size = sizeof(ggml_wgpu_tensor_params);
+        bgEntries[i].binding = i;
+        bgEntries[i].buffer  = ctx->buf_tensor_params;
+        bgEntries[i].offset  = 0;
+        bgEntries[i].size    = sizeof(ggml_wgpu_tensor_params);
 
         LOGT("%s: src0=%s buf=%s off=%llu\n", __func__, src0->name, wgpu_tensor_get_buf_label(src0), bgEntries[0].offset);
         LOGT("%s: src1=%s buf=%s off=%llu\n", __func__, src1->name, wgpu_tensor_get_buf_label(src1), bgEntries[1].offset);
-        LOGT("%s: dest=%s buf=%s off=%llu\n", __func__, tensor->name, wgpu_tensor_get_buf_label(tensor), bgEntries[2].offset);
+        LOGT("%s: dest=%s buf=%s off=%llu\n", __func__, dest->name, wgpu_tensor_get_buf_label(dest), bgEntries[2].offset);
     }
     wgpu::BindGroupDescriptor bgDesc = wgpu::Default;
     {
-        bgDesc.label = "bind_group";
-        bgDesc.layout = ctx->bind_group_layout;
-        bgDesc.entryCount = 4;
-        bgDesc.entries = bgEntries;
+        bgDesc.label      = inplace ? "bind_group_inplace" : "bind_group";
+        bgDesc.layout     = inplace ? ctx->bgl.inplace : ctx->bgl.normal;
+        bgDesc.entryCount = inplace ? 3 : 4;
+        bgDesc.entries    = bgEntries;
     };
     auto bindGroup = ctx->device.createBindGroup(bgDesc);
     GGML_ASSERT(bindGroup);

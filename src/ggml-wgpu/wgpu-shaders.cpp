@@ -5,8 +5,10 @@
 #include "wgpu-shaders.h"
 #include "ggml.h"
 
-static const char * get_shader_code_header() {
-    return R"(
+static const char * AUTO = "AUTO"; // auto generate in-place shader
+
+static void get_shader_code_header(bool inplace, std::ostringstream & ss) {
+    ss << R"(
         struct TensorParams {
             ne00 : i32,
             ne01 : i32,
@@ -48,11 +50,16 @@ static const char * get_shader_code_header() {
 
         @group(0) @binding(1)
         var<storage,read_write> src1: array<f32>;
-
+    )";
+    if (!inplace) ss << R"(
         @group(0) @binding(2)
         var<storage,read_write> dest: array<f32>;
 
         @group(0) @binding(3)
+        var<uniform> tensor_params: TensorParams;
+    )";
+    if (inplace) ss << R"(
+        @group(0) @binding(2)
         var<uniform> tensor_params: TensorParams;
     )";
 }
@@ -67,6 +74,7 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
                     @workgroup_size(1)
                     fn kernel_none(@builtin(global_invocation_id) global_id: vec3<u32>) {}
                 )",
+                /* .inpl = */ nullptr,
             };
             return &sh;
         }
@@ -84,6 +92,14 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
                                 dest[global_id.x + tensor_params.offs_dest/4u] = x;
                     }
                 )",
+                /* .inpl = */ R"(
+                    @compute
+                    @workgroup_size(1)
+                    fn kernel_dup(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                        let x = src0[global_id.x + tensor_params.offs_src0/4u];
+                                src1[global_id.x + tensor_params.offs_src1/4u] = x;
+                    }
+                )",
             };
             return &sh;
         }
@@ -97,6 +113,15 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
                         let x = src0[global_id.x + tensor_params.offs_src0/4u];
                         let y = src1[global_id.x + tensor_params.offs_src1/4u];
                                 dest[global_id.x + tensor_params.offs_dest/4u] = x + y;
+                    }
+                )",
+                /* .inpl = */ R"(
+                    @compute
+                    @workgroup_size(1)
+                    fn kernel_add(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                        let x = src0[global_id.x + tensor_params.offs_src0/4u];
+                        let y = src1[global_id.x + tensor_params.offs_src1/4u];
+                                src0[global_id.x + tensor_params.offs_src0/4u] = x + y;
                     }
                 )",
             };
@@ -117,6 +142,15 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
                         let x = src0[global_id.x + tensor_params.offs_src0/4u];
                         let y = src1[global_id.x + tensor_params.offs_src1/4u];
                                 dest[global_id.x + tensor_params.offs_dest/4u] = x / y;
+                    }
+                )",
+                /* .inpl = */ R"(
+                    @compute
+                    @workgroup_size(1)
+                    fn kernel_div(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                        let x = src0[global_id.x + tensor_params.offs_src0/4u];
+                        let y = src1[global_id.x + tensor_params.offs_src1/4u];
+                                src0[global_id.x + tensor_params.offs_src0/4u] = x / y;
                     }
                 )",
             };
@@ -218,13 +252,14 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
     }
 }
 
-std::string ggml_wgpu_build_shader_code() {
+std::string ggml_wgpu_build_shader_code(bool inplace) {
     std::ostringstream ss;
-    ss << get_shader_code_header();
+    get_shader_code_header(inplace, ss);
     for (int i = 0; i < GGML_OP_COUNT; i++) {
         const ggml_wgpu_shader * shader = ggml_wgpu_get_shader(static_cast<enum ggml_op>(i));
         if (shader == nullptr) continue;
-        ss << shader->code;
+        printf("shader=%s\n", shader->name);
+        ss << ((inplace && shader->inpl) ? shader->inpl : shader->code);
     }
     return ss.str();
 }

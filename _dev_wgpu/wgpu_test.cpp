@@ -38,28 +38,15 @@ float demo_mat_B[rows_B * cols_B] = {
     -1, 5
 };
 
-/**
- * Expected result:
- * [
- *  3.00 14.00
- *  -2.00 -6.00
- *  13.00 2.10
- *  7.00 -1.00
- * ]
- */
+static ggml_backend_t backend = NULL;
 
 struct simple_model {
     struct ggml_tensor * a;
     struct ggml_tensor * b;
-    ggml_backend_t backend = NULL;
     ggml_backend_buffer_t buffer;
     struct ggml_context * ctx;
 
     simple_model() {
-        printf("%s: using webgpu backend\n", __func__);
-        backend = ggml_backend_wgpu_init();
-        //backend = ggml_backend_cpu_init();
-        //ggml_backend_cpu_set_n_threads(backend, 1);
         if (!backend) {
             printf("%s: ggml_backend_wgpu_init() failed\n", __func__);
         }
@@ -98,7 +85,7 @@ struct ggml_cgraph * build_graph(const simple_model & model) {
     struct ggml_context * ctx0 = ggml_init(params0);
     struct ggml_cgraph  * gf = ggml_new_graph(ctx0);
     struct ggml_tensor * result = ggml_add(ctx0, model.a, model.b);
-    // result = ggml_div(ctx0, result, model.b);
+    result = ggml_div(ctx0, result, model.b);
     // result = ggml_div(ctx0, result, model.b);
     // result = ggml_div(ctx0, result, model.b);
     // result = ggml_div(ctx0, result, model.b);
@@ -110,15 +97,15 @@ struct ggml_cgraph * build_graph(const simple_model & model) {
 struct ggml_tensor * compute(const simple_model & model, ggml_gallocr_t allocr) {
     struct ggml_cgraph * gf = build_graph(model);
     ggml_gallocr_alloc_graph(allocr, gf);
-    ggml_backend_graph_compute(model.backend, gf);
+    ggml_backend_graph_compute(backend, gf);
     return ggml_graph_node(gf, -1);
 }
 
-int main() {
+int run() {
     ggml_time_init();
     simple_model model;
 
-    ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
+    ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     struct ggml_tensor * result = compute(model, allocr);
 
     // get result
@@ -134,11 +121,26 @@ int main() {
         printf("\n");
     }
     printf("]\n");
-    emscripten_sleep(10000);
 
     ggml_gallocr_free(allocr);
     ggml_free(model.ctx);
     ggml_backend_buffer_free(model.buffer);
-    ggml_backend_free(model.backend);
+    ggml_backend_free(backend);
+    return 0;
+}
+
+int main() {
+#if 1
+    // ground-truth result
+    printf("%s: using cpu backend\n", __func__);
+    backend = ggml_backend_cpu_init();
+    ggml_backend_cpu_set_n_threads(backend, 1);
+    run();
+#endif
+    // wgpu result
+    printf("%s: using webgpu backend\n", __func__);
+    backend = ggml_backend_wgpu_init();
+    run();
+    emscripten_sleep(10000);
     return 0;
 }
