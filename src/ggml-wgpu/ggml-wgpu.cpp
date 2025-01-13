@@ -65,10 +65,12 @@ struct ggml_wgpu_context {
 
     // one pipeline per kernel
     wgpu::ComputePipeline pipeline_op[GGML_OP_COUNT];
+    wgpu::ComputePipeline pipeline_inpl_op[GGML_OP_COUNT];
     wgpu::ComputePipeline pipeline_unary_op[GGML_UNARY_OP_COUNT];
 
     ggml_backend_buffer_type_t buft = nullptr;
     bool                  buft_initialized = false;
+    wgpu::Buffer          buf_dummy;
     wgpu::Buffer          buf_tensor_params;
     ggml_wgpu_tensor_params tensor_params_host;
 
@@ -166,6 +168,14 @@ struct ggml_wgpu_context {
                 };
                 pipeline_op[i] = device.createComputePipeline(cpDesc);
                 GGML_ASSERT(pipeline_op[i] && "cannot create Pipeline");
+                // create inplace version if needed
+                if (shader->inpl) {
+                    std::string entrypoint = std::string(shader->name) + "_inplace";
+                    cpDesc.label = entrypoint.c_str();
+                    cpDesc.compute.entryPoint = entrypoint.c_str();
+                    pipeline_inpl_op[i] = device.createComputePipeline(cpDesc);
+                    GGML_ASSERT(pipeline_inpl_op[i] && "cannot create Pipeline (inplace)");
+                }
             }
         }
 
@@ -173,13 +183,26 @@ struct ggml_wgpu_context {
         {
             wgpu::BufferDescriptor bufDesc = wgpu::Default;
             {
-                bufDesc.label = "params_buffer";
+                bufDesc.label = "buffer_params";
                 bufDesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
                 bufDesc.size = GGML_PAD(sizeof(ggml_wgpu_tensor_params), BUF_ALIGN);
                 bufDesc.mappedAtCreation = false;
             };
             buf_tensor_params = device.createBuffer(bufDesc);
-            GGML_ASSERT(buf_tensor_params && "cannot create params_buffer");
+            GGML_ASSERT(buf_tensor_params && "cannot create buffer_params");
+        }
+
+        // alloc dumy buffer, to be used by inplace ops
+        {
+            wgpu::BufferDescriptor bufDesc = wgpu::Default;
+            {
+                bufDesc.label = "buffer_dummy";
+                bufDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::CopySrc;
+                bufDesc.size = BUF_ALIGN;
+                bufDesc.mappedAtCreation = false;
+            };
+            buf_dummy = device.createBuffer(bufDesc);
+            GGML_ASSERT(buf_dummy && "cannot create buffer_dummy");
         }
     }
 
@@ -419,32 +442,38 @@ static void ggml_backend_wgpu_synchronize(ggml_backend_t backend) {
     UNUSED(backend);
 }
 
-ggml_wgpu_buffer_context * wgpu_tensor_get_buf_ctx(const ggml_tensor * t) {
+static ggml_wgpu_buffer_context * wgpu_tensor_get_buf_ctx(const ggml_tensor * t) {
     ggml_backend_buffer_t buf = t->view_src ? t->view_src->buffer : t->buffer;
     return (ggml_wgpu_buffer_context *)buf->context;
 }
 
-const char * wgpu_tensor_get_buf_label(const ggml_tensor * t) {
+static const char * wgpu_tensor_get_buf_label(const ggml_tensor * t) {
     ggml_wgpu_buffer_context * buf_ctx = wgpu_tensor_get_buf_ctx(t);
     return buf_ctx->label.c_str();
 }
 
-wgpu::Buffer wgpu_tensor_get_buffer(const ggml_tensor * t) {
+static wgpu::Buffer wgpu_tensor_get_buffer(const ggml_tensor * t) {
     ggml_wgpu_buffer_context * buf_ctx = wgpu_tensor_get_buf_ctx(t);
     return buf_ctx->buffer;
 }
 
-size_t wgpu_tensor_get_offset(const ggml_tensor * t) {
+static size_t wgpu_tensor_get_offset(const ggml_tensor * t) {
     return (size_t)t->data - BUF_BASE;
 }
 
 bool ggml_wgpu_compute_forward(ggml_wgpu_context * ctx, struct ggml_tensor * tensor) {
     LOGT("%s: %s op=%s\n", __func__, tensor->name, ggml_op_name(tensor->op));
 
-    wgpu::ComputePipeline compPipeline = ctx->pipeline_op[tensor->op];
-
     const ggml_tensor * src0 = tensor->src[0];
     const ggml_tensor * src1 = tensor->src[1];
+    const ggml_tensor * dest = tensor;
+
+    // inplace == same buf && same offset
+    bool inplace = src0->buffer == dest->buffer && src0->data == dest->data;
+
+    wgpu::ComputePipeline compPipeline = inplace
+        ? ctx->pipeline_inpl_op[tensor->op]
+        : ctx->pipeline_op[tensor->op];
 
     // ctx->tensor_params_host
     ctx->queue.writeBuffer(ctx->buf_tensor_params, 0, &ctx->tensor_params_host, sizeof(ggml_wgpu_tensor_params));
@@ -453,28 +482,28 @@ bool ggml_wgpu_compute_forward(ggml_wgpu_context * ctx, struct ggml_tensor * ten
     wgpu::BindGroupEntry bgEntries[4];
     {
         bgEntries[0].binding = 0;
-        bgEntries[0].buffer = wgpu_tensor_get_buffer(src0);
-        bgEntries[0].offset = wgpu_tensor_get_offset(src0);
-        bgEntries[0].size = wgpu_tensor_get_nbytes(src0);
+        bgEntries[0].buffer  = wgpu_tensor_get_buffer(src0);
+        bgEntries[0].offset  = wgpu_tensor_get_offset(src0);
+        bgEntries[0].size    = wgpu_tensor_get_nbytes(src0);
 
         bgEntries[1].binding = 1;
-        bgEntries[1].buffer = wgpu_tensor_get_buffer(src1);
-        bgEntries[1].offset = wgpu_tensor_get_offset(src1);
-        bgEntries[1].size = wgpu_tensor_get_nbytes(src1);
+        bgEntries[1].buffer  = wgpu_tensor_get_buffer(src1);
+        bgEntries[1].offset  = wgpu_tensor_get_offset(src1);
+        bgEntries[1].size    = wgpu_tensor_get_nbytes(src1);
 
         bgEntries[2].binding = 2;
-        bgEntries[2].buffer = wgpu_tensor_get_buffer(tensor);
-        bgEntries[2].offset = wgpu_tensor_get_offset(tensor);
-        bgEntries[2].size = wgpu_tensor_get_nbytes(tensor);
+        bgEntries[2].buffer  = !inplace ? wgpu_tensor_get_buffer(dest) : ctx->buf_dummy;
+        bgEntries[2].offset  = !inplace ? wgpu_tensor_get_offset(dest) : 0;
+        bgEntries[2].size    = !inplace ? wgpu_tensor_get_nbytes(dest) : BUF_ALIGN;
 
         bgEntries[3].binding = 3;
-        bgEntries[3].buffer = ctx->buf_tensor_params;
-        bgEntries[3].offset = 0;
-        bgEntries[3].size = sizeof(ggml_wgpu_tensor_params);
+        bgEntries[3].buffer  = ctx->buf_tensor_params;
+        bgEntries[3].offset  = 0;
+        bgEntries[3].size    = sizeof(ggml_wgpu_tensor_params);
 
         LOGT("%s: src0=%s buf=%s off=%llu\n", __func__, src0->name, wgpu_tensor_get_buf_label(src0), bgEntries[0].offset);
         LOGT("%s: src1=%s buf=%s off=%llu\n", __func__, src1->name, wgpu_tensor_get_buf_label(src1), bgEntries[1].offset);
-        LOGT("%s: dest=%s buf=%s off=%llu\n", __func__, tensor->name, wgpu_tensor_get_buf_label(tensor), bgEntries[2].offset);
+        LOGT("%s: dest=%s buf=%s off=%llu\n", __func__, dest->name, wgpu_tensor_get_buf_label(dest), bgEntries[2].offset);
     }
     wgpu::BindGroupDescriptor bgDesc = wgpu::Default;
     {

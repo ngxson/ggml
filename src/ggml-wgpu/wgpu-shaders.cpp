@@ -67,6 +67,7 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
                     @workgroup_size(1)
                     fn kernel_none(@builtin(global_invocation_id) global_id: vec3<u32>) {}
                 )",
+                /* inpl = */ nullptr,
             };
             return &sh;
         }
@@ -84,6 +85,7 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
                                 dest[global_id.x + tensor_params.offs_dest/4u] = x;
                     }
                 )",
+                /* inpl = */ nullptr,
             };
             return &sh;
         }
@@ -99,6 +101,7 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
                                 dest[global_id.x + tensor_params.offs_dest/4u] = x + y;
                     }
                 )",
+                /* inpl = */ nullptr,
             };
             return &sh;
         }
@@ -117,6 +120,15 @@ const ggml_wgpu_shader * ggml_wgpu_get_shader(enum ggml_op op) {
                         let x = src0[global_id.x + tensor_params.offs_src0/4u];
                         let y = src1[global_id.x + tensor_params.offs_src1/4u];
                                 dest[global_id.x + tensor_params.offs_dest/4u] = x / y;
+                    }
+                )",
+                /* inpl = */ R"(
+                    @compute
+                    @workgroup_size(1)
+                    fn kernel_div_inplace(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                        let x = src0[global_id.x + tensor_params.offs_src0/4u];
+                        let y = src1[global_id.x + tensor_params.offs_src1/4u];
+                                src0[global_id.x + tensor_params.offs_src0/4u] = x / y;
                     }
                 )",
             };
@@ -225,6 +237,9 @@ std::string ggml_wgpu_build_shader_code() {
         const ggml_wgpu_shader * shader = ggml_wgpu_get_shader(static_cast<enum ggml_op>(i));
         if (shader == nullptr) continue;
         ss << shader->code;
+        if (shader->inpl) {
+            ss << shader->inpl;
+        }
     }
     return ss.str();
 }
