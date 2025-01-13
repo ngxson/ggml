@@ -27,6 +27,25 @@
 
 #define LOGD(...) printf(__VA_ARGS__)
 
+// TODO: check secured context (https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API#security_requirements)
+
+// https://eliemichel.github.io/LearnWebGPU/basic-3d-rendering/input-geometry/playing-with-buffers.html
+void wgpuPollEvents(wgpu::Device & device, bool yieldToWebBrowser) {
+#if defined(WEBGPU_BACKEND_DAWN)
+    GGML_UNUSED(yieldToWebBrowser);
+    device.tick();
+#elif defined(WEBGPU_BACKEND_WGPU)
+    GGML_UNUSED(yieldToWebBrowser);
+    device.poll(false);
+#elif defined(__EMSCRIPTEN__)
+    GGML_UNUSED(device);
+    LOGT("%s [emscripten]\n", __func__);
+    if (yieldToWebBrowser) {
+        emscripten_sleep(1); // IMPORTANT: need linker flag -sASYNCIFY=1
+    }
+#endif
+}
+
 size_t wgpu_tensor_get_nbytes(const ggml_tensor * tensor) {
     return GGML_PAD(ggml_nbytes(tensor), BUF_ALIGN);
 }
@@ -54,6 +73,7 @@ struct ggml_wgpu_context {
     ggml_wgpu_tensor_params tensor_params_host;
 
     ggml_wgpu_context() {
+        LOGT("%s [constructor]\n", __func__);
         // instance = wgpu::createInstance(&instanceDesc);
         // descriptor not implemented yet in emscripten
         instance = wgpuCreateInstance(nullptr);
@@ -61,6 +81,7 @@ struct ggml_wgpu_context {
         adapter = instance.requestAdapter(reqAdaptOpts);
         wgpu::DeviceDescriptor deviceDesc = wgpu::Default;
         device = adapter.requestDevice(deviceDesc);
+        device.setLabel("wgpu_device");
         queue = device.getQueue();
 
         // init bind group layout
@@ -169,6 +190,7 @@ struct ggml_wgpu_context {
 };
 
 // we only support single device for now
+static ggml_wgpu_context * ggml_wgpu_ctx_instance = nullptr;
 using ggml_wgpu_buffer_type_context = ggml_wgpu_context;
 
 int buff_id = 0;
@@ -241,9 +263,7 @@ struct ggml_wgpu_buffer_context {
             }
         });
         while (!ready) {
-            // TODO: not ideal, but we don't have other way to poll GPU in emscripten
-            // https://eliemichel.github.io/LearnWebGPU/basic-3d-rendering/input-geometry/playing-with-buffers.html
-            emscripten_sleep(1);
+            wgpuPollEvents(ctx->device, true);
         }
 
         // get output buf
@@ -558,13 +578,15 @@ static void ggml_backend_wgpu_device_get_props(ggml_backend_dev_t dev, struct gg
 GGML_API ggml_backend_t ggml_backend_wgpu_device_init_backend(ggml_backend_dev_t dev, const char * params) {
     LOGT("%s\n", __func__);
     GGML_UNUSED(params);
-    ggml_wgpu_context * ctx = new ggml_wgpu_context;
+    if (!ggml_wgpu_ctx_instance) {
+        ggml_wgpu_ctx_instance = new ggml_wgpu_context;
+    }
     static const char * guid_str = "__ggml_webgpu :)";
     ggml_backend_t wgpu_backend = new ggml_backend{
         /* .guid      = */ reinterpret_cast<ggml_guid_t>((void *)guid_str),
         /* .interface = */ ggml_backend_wgpu_interface,
         /* .device    = */ dev,
-        /* .context   = */ ctx,
+        /* .context   = */ ggml_wgpu_ctx_instance,
     };
     return wgpu_backend;
 }
@@ -610,11 +632,13 @@ ggml_backend_reg_t ggml_backend_wgpu_reg(void) {
 }
 
 ggml_backend_dev_t ggml_backend_wgpu_add_device(void) {
-    ggml_wgpu_context * ctx = new ggml_wgpu_context;
+    if (!ggml_wgpu_ctx_instance) {
+        ggml_wgpu_ctx_instance = new ggml_wgpu_context;
+    }
     ggml_backend_dev_t dev = new ggml_backend_device {
         /* .iface   = */ ggml_backend_wgpu_device_i,
         /* .reg     = */ ggml_backend_wgpu_reg(),
-        /* .context = */ ctx,
+        /* .context = */ ggml_wgpu_ctx_instance,
     };
     return dev;
 }

@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include <emscripten/emscripten.h>
+
 // brew install emscripten
 // emcmake cmake -B build-web -DGGML_WGPU=ON && cmake --build build-web -j --target wgpu_test
 // npx http-server build-web/bin -p 9999 -c-1
@@ -132,6 +134,7 @@ int main() {
         printf("\n");
     }
     printf("]\n");
+    emscripten_sleep(10000);
 
     ggml_gallocr_free(allocr);
     ggml_free(model.ctx);
