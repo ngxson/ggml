@@ -7393,250 +7393,83 @@ void ggml_vec_dot_q6_K_q8_K(int n, float * restrict s, size_t bs, const void * r
 
     *s = hsum_float_8(acc);
 
-#elif defined __wasm_simd128__DISABLED // currently disabled due to inaccuracy
-    // WASM SIMD implementation
-    float sumf = 0;
-
-    const v128_t m3 = wasm_i8x16_splat(0x03);
-    const v128_t m4 = wasm_i8x16_splat(0x0F);
-    const v128_t m32 = wasm_i8x16_splat(32);
+#elif defined __wasm_simd128__
+    int8_t aux8[QK_K] __attribute__((aligned(16)));
+    int32_t aux32[8] __attribute__((aligned(16))) = {0};
+    float sums[8] __attribute__((aligned(16))) = {0};
 
     for (int i = 0; i < nb; ++i) {
-        const float d_all = GGML_FP16_TO_FP32(x[i].d);
-        const float d = d_all * y[i].d;
-
-        const uint8_t * restrict q6 = x[i].ql;
+        // Unpack 6-bit quantized data into aux8 (unchanged)
+        const uint8_t * restrict q4 = x[i].ql;
         const uint8_t * restrict qh = x[i].qh;
-        const int8_t  * restrict q8 = y[i].qs;
-        const int8_t  * scales = x[i].scales;
-
-        // Compute isum_mins
-        v128_t q8sums_lo = wasm_v128_load(y[i].bsums);
-        v128_t q8sums_hi = wasm_v128_load(y[i].bsums + 8);
-        v128_t scales_8 = wasm_v128_load(scales);
-        v128_t scales_lo = wasm_i16x8_extend_low_i8x16(scales_8);
-        v128_t scales_hi = wasm_i16x8_extend_high_i8x16(scales_8);
-
-        v128_t prod_lo = wasm_i16x8_mul(q8sums_lo, scales_lo);
-        v128_t prod_hi = wasm_i16x8_mul(q8sums_hi, scales_hi);
-
-        v128_t sum_prod = wasm_i32x4_add(wasm_i32x4_add(wasm_i32x4_extend_low_i16x8(prod_lo),
-                                                        wasm_i32x4_extend_high_i16x8(prod_lo)),
-                                         wasm_i32x4_add(wasm_i32x4_extend_low_i16x8(prod_hi),
-                                                        wasm_i32x4_extend_high_i16x8(prod_hi)));
-        int32_t isum_mins = wasm_i32x4_extract_lane(sum_prod, 0)
-                          + wasm_i32x4_extract_lane(sum_prod, 1)
-                          + wasm_i32x4_extract_lane(sum_prod, 2)
-                          + wasm_i32x4_extract_lane(sum_prod, 3);
-
-        int32_t isum = 0;
-
-        for (int j = 0; j < QK_K/128; ++j) {
-            v128_t h0 = wasm_v128_load(qh); qh += 16;
-            v128_t h1 = wasm_v128_load(qh); qh += 16;
-
-            v128_t q6_0 = wasm_v128_load(q6); q6 += 16;
-            v128_t q6_1 = wasm_v128_load(q6); q6 += 16;
-            v128_t q6_2 = wasm_v128_load(q6); q6 += 16;
-            v128_t q6_3 = wasm_v128_load(q6); q6 += 16;
-
-            // Process low nibbles
-            {
-                v128_t qh_shift0 = wasm_u8x16_shr(h0, 2);
-                v128_t qh_shift1 = wasm_u8x16_shr(h1, 2);
-
-                v128_t q6h_0 = wasm_i8x16_shl(wasm_v128_and(h0, m3), 4);
-                v128_t q6h_1 = wasm_i8x16_shl(wasm_v128_and(h1, m3), 4);
-                v128_t q6h_2 = wasm_i8x16_shl(wasm_v128_and(qh_shift0, m3), 4);
-                v128_t q6h_3 = wasm_i8x16_shl(wasm_v128_and(qh_shift1, m3), 4);
-
-                v128_t q6l_0 = wasm_i8x16_sub(wasm_v128_or(wasm_v128_and(q6_0, m4), q6h_0), m32);
-                v128_t q6l_1 = wasm_i8x16_sub(wasm_v128_or(wasm_v128_and(q6_1, m4), q6h_1), m32);
-                v128_t q6l_2 = wasm_i8x16_sub(wasm_v128_or(wasm_v128_and(q6_2, m4), q6h_2), m32);
-                v128_t q6l_3 = wasm_i8x16_sub(wasm_v128_or(wasm_v128_and(q6_3, m4), q6h_3), m32);
-
-                v128_t q8_0 = wasm_v128_load(q8); q8 += 16;
-                v128_t q8_1 = wasm_v128_load(q8); q8 += 16;
-                v128_t q8_2 = wasm_v128_load(q8); q8 += 16;
-                v128_t q8_3 = wasm_v128_load(q8); q8 += 16;
-
-                // Compute dot products and horizontal sums
-                v128_t p0 = wasm_i32x4_add(
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(q6l_0), wasm_i16x8_extend_low_i8x16(q8_0)),
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(q6l_0), wasm_i16x8_extend_high_i8x16(q8_0))
-                );
-                int32_t p0_sum = wasm_i32x4_extract_lane(p0, 0) + wasm_i32x4_extract_lane(p0, 1)
-                               + wasm_i32x4_extract_lane(p0, 2) + wasm_i32x4_extract_lane(p0, 3);
-
-                v128_t p1 = wasm_i32x4_add(
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(q6l_1), wasm_i16x8_extend_low_i8x16(q8_1)),
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(q6l_1), wasm_i16x8_extend_high_i8x16(q8_1))
-                );
-                int32_t p1_sum = wasm_i32x4_extract_lane(p1, 0) + wasm_i32x4_extract_lane(p1, 1)
-                               + wasm_i32x4_extract_lane(p1, 2) + wasm_i32x4_extract_lane(p1, 3);
-
-                v128_t p2 = wasm_i32x4_add(
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(q6l_2), wasm_i16x8_extend_low_i8x16(q8_2)),
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(q6l_2), wasm_i16x8_extend_high_i8x16(q8_2))
-                );
-                int32_t p2_sum = wasm_i32x4_extract_lane(p2, 0) + wasm_i32x4_extract_lane(p2, 1)
-                               + wasm_i32x4_extract_lane(p2, 2) + wasm_i32x4_extract_lane(p2, 3);
-
-                v128_t p3 = wasm_i32x4_add(
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(q6l_3), wasm_i16x8_extend_low_i8x16(q8_3)),
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(q6l_3), wasm_i16x8_extend_high_i8x16(q8_3))
-                );
-                int32_t p3_sum = wasm_i32x4_extract_lane(p3, 0) + wasm_i32x4_extract_lane(p3, 1)
-                               + wasm_i32x4_extract_lane(p3, 2) + wasm_i32x4_extract_lane(p3, 3);
-
-                isum += p0_sum * scales[0] + p1_sum * scales[1] + p2_sum * scales[2] + p3_sum * scales[3];
-                scales += 4;
+        int8_t * a = aux8;
+        for (int j = 0; j < QK_K; j += 128) {
+            for (int l = 0; l < 32; ++l) {
+                a[l +  0] = (int8_t)((q4[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                a[l + 32] = (int8_t)((q4[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                a[l + 64] = (int8_t)((q4[l +  0] >>  4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                a[l + 96] = (int8_t)((q4[l + 32] >>  4) | (((qh[l] >> 6) & 3) << 4)) - 32;
             }
-
-            // Process high nibbles
-            {
-                v128_t qh_shift0 = wasm_u8x16_shr(h0, 4);
-                v128_t qh_shift1 = wasm_u8x16_shr(h1, 4);
-                v128_t qh_shift2 = wasm_u8x16_shr(h0, 6);
-                v128_t qh_shift3 = wasm_u8x16_shr(h1, 6);
-
-                v128_t q6h_0 = wasm_i8x16_shl(wasm_v128_and(qh_shift0, m3), 4);
-                v128_t q6h_1 = wasm_i8x16_shl(wasm_v128_and(qh_shift1, m3), 4);
-                v128_t q6h_2 = wasm_i8x16_shl(wasm_v128_and(qh_shift2, m3), 4);
-                v128_t q6h_3 = wasm_i8x16_shl(wasm_v128_and(qh_shift3, m3), 4);
-
-                v128_t q6h_0_high = wasm_i8x16_sub(wasm_v128_or(wasm_u8x16_shr(q6_0, 4), q6h_0), m32);
-                v128_t q6h_1_high = wasm_i8x16_sub(wasm_v128_or(wasm_u8x16_shr(q6_1, 4), q6h_1), m32);
-                v128_t q6h_2_high = wasm_i8x16_sub(wasm_v128_or(wasm_u8x16_shr(q6_2, 4), q6h_2), m32);
-                v128_t q6h_3_high = wasm_i8x16_sub(wasm_v128_or(wasm_u8x16_shr(q6_3, 4), q6h_3), m32);
-
-                v128_t q8_4 = wasm_v128_load(q8); q8 += 16;
-                v128_t q8_5 = wasm_v128_load(q8); q8 += 16;
-                v128_t q8_6 = wasm_v128_load(q8); q8 += 16;
-                v128_t q8_7 = wasm_v128_load(q8); q8 += 16;
-
-                // Compute dot products and horizontal sums
-                v128_t p4 = wasm_i32x4_add(
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(q6h_0_high), wasm_i16x8_extend_low_i8x16(q8_4)),
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(q6h_0_high), wasm_i16x8_extend_high_i8x16(q8_4))
-                );
-                int32_t p4_sum = wasm_i32x4_extract_lane(p4, 0) + wasm_i32x4_extract_lane(p4, 1)
-                               + wasm_i32x4_extract_lane(p4, 2) + wasm_i32x4_extract_lane(p4, 3);
-
-                v128_t p5 = wasm_i32x4_add(
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(q6h_1_high), wasm_i16x8_extend_low_i8x16(q8_5)),
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(q6h_1_high), wasm_i16x8_extend_high_i8x16(q8_5))
-                );
-                int32_t p5_sum = wasm_i32x4_extract_lane(p5, 0) + wasm_i32x4_extract_lane(p5, 1)
-                               + wasm_i32x4_extract_lane(p5, 2) + wasm_i32x4_extract_lane(p5, 3);
-
-                v128_t p6 = wasm_i32x4_add(
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(q6h_2_high), wasm_i16x8_extend_low_i8x16(q8_6)),
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(q6h_2_high), wasm_i16x8_extend_high_i8x16(q8_6))
-                );
-                int32_t p6_sum = wasm_i32x4_extract_lane(p6, 0) + wasm_i32x4_extract_lane(p6, 1)
-                               + wasm_i32x4_extract_lane(p6, 2) + wasm_i32x4_extract_lane(p6, 3);
-
-                v128_t p7 = wasm_i32x4_add(
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(q6h_3_high), wasm_i16x8_extend_low_i8x16(q8_7)),
-                    wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(q6h_3_high), wasm_i16x8_extend_high_i8x16(q8_7))
-                );
-                int32_t p7_sum = wasm_i32x4_extract_lane(p7, 0) + wasm_i32x4_extract_lane(p7, 1)
-                               + wasm_i32x4_extract_lane(p7, 2) + wasm_i32x4_extract_lane(p7, 3);
-
-                isum += p4_sum * scales[0] + p5_sum * scales[1] + p6_sum * scales[2] + p7_sum * scales[3];
-                scales += 4;
-            }
+            a += 128;
+            q4 += 64;
+            qh += 32;
         }
 
-        sumf += d * (isum - 32 * isum_mins);
-    }
+        const int8_t * restrict a_ptr = aux8;
+        const int8_t * restrict q8 = y[i].qs;
+        v128_t acc0 = wasm_i32x4_splat(0);
+        v128_t acc1 = wasm_i32x4_splat(0);
 
-    *s = sumf;
+        for (int j = 0; j < QK_K/16; ++j) {
+            const int scale = x[i].scales[j];
+            const v128_t vscale = wasm_i32x4_splat(scale);
 
-#elif defined __riscv_v_intrinsic
+            // Load 16 elements from a and q8
+            const v128_t a_vec = wasm_v128_load(a_ptr);
+            const v128_t q8_vec = wasm_v128_load(q8);
 
-    float sumf = 0;
-    for (int i = 0; i < nb; ++i) {
+            // Process low 8 elements
+            v128_t a_low = wasm_i16x8_extend_low_i8x16(a_vec);
+            v128_t q8_low = wasm_i16x8_extend_low_i8x16(q8_vec);
+            v128_t prod_low = wasm_i16x8_mul(a_low, q8_low);
+            v128_t prod_lo_lo = wasm_i32x4_extend_low_i16x8(prod_low);
+            v128_t prod_lo_hi = wasm_i32x4_extend_high_i16x8(prod_low);
+
+            // Process high 8 elements
+            v128_t a_high = wasm_i16x8_extend_high_i8x16(a_vec);
+            v128_t q8_high = wasm_i16x8_extend_high_i8x16(q8_vec);
+            v128_t prod_high = wasm_i16x8_mul(a_high, q8_high);
+            v128_t prod_hi_lo = wasm_i32x4_extend_low_i16x8(prod_high);
+            v128_t prod_hi_hi = wasm_i32x4_extend_high_i16x8(prod_high);
+
+            // Scale and accumulate
+            prod_lo_lo = wasm_i32x4_mul(prod_lo_lo, vscale);
+            prod_lo_hi = wasm_i32x4_mul(prod_lo_hi, vscale);
+            prod_hi_lo = wasm_i32x4_mul(prod_hi_lo, vscale);
+            prod_hi_hi = wasm_i32x4_mul(prod_hi_hi, vscale);
+
+            acc0 = wasm_i32x4_add(acc0, wasm_i32x4_add(prod_lo_lo, prod_hi_lo));
+            acc1 = wasm_i32x4_add(acc1, wasm_i32x4_add(prod_lo_hi, prod_hi_hi));
+
+            a_ptr += 16;
+            q8 += 16;
+        }
+
+        // Store accumulated results
+        wasm_v128_store(&aux32[0], acc0);
+        wasm_v128_store(&aux32[4], acc1);
 
         const float d = GGML_FP16_TO_FP32(x[i].d) * y[i].d;
-
-        const uint8_t * restrict q6 = x[i].ql;
-        const uint8_t * restrict qh = x[i].qh;
-        const  int8_t * restrict q8 = y[i].qs;
-
-        const int8_t * restrict scale = x[i].scales;
-
-        size_t vl;
-
-        vint32m1_t vzero = __riscv_vmv_v_x_i32m1(0, 1);
-
-        int sum_t = 0;
-        int is = 0;
-
-        for (int j = 0; j < QK_K/128; ++j) {
-
-            vl = 32;
-
-            // load qh
-            vuint8m1_t qh_x = __riscv_vle8_v_u8m1(qh, vl);
-
-            // load Q6
-            vuint8m1_t q6_0 = __riscv_vle8_v_u8m1(q6, vl);
-            vuint8m1_t q6_1 = __riscv_vle8_v_u8m1(q6+32, vl);
-
-            vuint8m1_t q6a_0 = __riscv_vand_vx_u8m1(q6_0, 0x0F, vl);
-            vuint8m1_t q6a_1 = __riscv_vand_vx_u8m1(q6_1, 0x0F, vl);
-            vuint8m1_t q6s_0 = __riscv_vsrl_vx_u8m1(q6_0, 0x04, vl);
-            vuint8m1_t q6s_1 = __riscv_vsrl_vx_u8m1(q6_1, 0x04, vl);
-
-            vuint8m1_t qh_0 = __riscv_vand_vx_u8m1(qh_x, 0x03, vl);
-            vuint8m1_t qh_1 = __riscv_vand_vx_u8m1(__riscv_vsrl_vx_u8m1(qh_x, 0x2, vl), 0x03 , vl);
-            vuint8m1_t qh_2 = __riscv_vand_vx_u8m1(__riscv_vsrl_vx_u8m1(qh_x, 0x4, vl), 0x03 , vl);
-            vuint8m1_t qh_3 = __riscv_vand_vx_u8m1(__riscv_vsrl_vx_u8m1(qh_x, 0x6, vl), 0x03 , vl);
-
-            vuint8m1_t qhi_0 = __riscv_vor_vv_u8m1(q6a_0, __riscv_vsll_vx_u8m1(qh_0, 0x04, vl), vl);
-            vuint8m1_t qhi_1 = __riscv_vor_vv_u8m1(q6a_1, __riscv_vsll_vx_u8m1(qh_1, 0x04, vl), vl);
-            vuint8m1_t qhi_2 = __riscv_vor_vv_u8m1(q6s_0, __riscv_vsll_vx_u8m1(qh_2, 0x04, vl), vl);
-            vuint8m1_t qhi_3 = __riscv_vor_vv_u8m1(q6s_1, __riscv_vsll_vx_u8m1(qh_3, 0x04, vl), vl);
-
-            vint8m1_t a_0 = __riscv_vsub_vx_i8m1(__riscv_vreinterpret_v_u8m1_i8m1(qhi_0), 32, vl);
-            vint8m1_t a_1 = __riscv_vsub_vx_i8m1(__riscv_vreinterpret_v_u8m1_i8m1(qhi_1), 32, vl);
-            vint8m1_t a_2 = __riscv_vsub_vx_i8m1(__riscv_vreinterpret_v_u8m1_i8m1(qhi_2), 32, vl);
-            vint8m1_t a_3 = __riscv_vsub_vx_i8m1(__riscv_vreinterpret_v_u8m1_i8m1(qhi_3), 32, vl);
-
-            // load Q8 and take product
-            vint16m2_t va_q_0 = __riscv_vwmul_vv_i16m2(a_0, __riscv_vle8_v_i8m1(q8, vl), vl);
-            vint16m2_t va_q_1 = __riscv_vwmul_vv_i16m2(a_1, __riscv_vle8_v_i8m1(q8+32, vl), vl);
-            vint16m2_t va_q_2 = __riscv_vwmul_vv_i16m2(a_2, __riscv_vle8_v_i8m1(q8+64, vl), vl);
-            vint16m2_t va_q_3 = __riscv_vwmul_vv_i16m2(a_3, __riscv_vle8_v_i8m1(q8+96, vl), vl);
-
-            vl = 16;
-
-            vint32m2_t vaux_0 = __riscv_vwmul_vx_i32m2(__riscv_vget_v_i16m2_i16m1(va_q_0, 0), scale[is+0], vl);
-            vint32m2_t vaux_1 = __riscv_vwmul_vx_i32m2(__riscv_vget_v_i16m2_i16m1(va_q_0, 1), scale[is+1], vl);
-            vint32m2_t vaux_2 = __riscv_vwmul_vx_i32m2(__riscv_vget_v_i16m2_i16m1(va_q_1, 0), scale[is+2], vl);
-            vint32m2_t vaux_3 = __riscv_vwmul_vx_i32m2(__riscv_vget_v_i16m2_i16m1(va_q_1, 1), scale[is+3], vl);
-            vint32m2_t vaux_4 = __riscv_vwmul_vx_i32m2(__riscv_vget_v_i16m2_i16m1(va_q_2, 0), scale[is+4], vl);
-            vint32m2_t vaux_5 = __riscv_vwmul_vx_i32m2(__riscv_vget_v_i16m2_i16m1(va_q_2, 1), scale[is+5], vl);
-            vint32m2_t vaux_6 = __riscv_vwmul_vx_i32m2(__riscv_vget_v_i16m2_i16m1(va_q_3, 0), scale[is+6], vl);
-            vint32m2_t vaux_7 = __riscv_vwmul_vx_i32m2(__riscv_vget_v_i16m2_i16m1(va_q_3, 1), scale[is+7], vl);
-
-            vint32m1_t isum0 = __riscv_vredsum_vs_i32m2_i32m1(__riscv_vadd_vv_i32m2(vaux_0, vaux_1, vl), vzero, vl);
-            vint32m1_t isum1 = __riscv_vredsum_vs_i32m2_i32m1(__riscv_vadd_vv_i32m2(vaux_2, vaux_3, vl), isum0, vl);
-            vint32m1_t isum2 = __riscv_vredsum_vs_i32m2_i32m1(__riscv_vadd_vv_i32m2(vaux_4, vaux_5, vl), isum1, vl);
-            vint32m1_t isum3 = __riscv_vredsum_vs_i32m2_i32m1(__riscv_vadd_vv_i32m2(vaux_6, vaux_7, vl), isum2, vl);
-
-            sum_t += __riscv_vmv_x_s_i32m1_i32(isum3);
-
-            q6 += 64;   qh += 32;   q8 += 128;   is=8;
-
+        for (int l = 0; l < 8; ++l) {
+            sums[l] += d * aux32[l];
         }
-
-        sumf += d * sum_t;
-
     }
 
+    // Sum final results
+    float sumf = 0;
+    for (int l = 0; l < 8; ++l) {
+        sumf += sums[l];
+    }
     *s = sumf;
 
 #elif defined(__POWER9_VECTOR__)

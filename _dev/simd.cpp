@@ -31,8 +31,9 @@ const int rows_B = 512, cols_B = 256;
 float demo_mat_A[rows_A * cols_A];
 float demo_mat_B[rows_B * cols_B];
 
+int SEED = 42;
 void init_demo_data() {
-    srand(42);
+    srand(SEED);
     for (int i = 0; i < rows_A * cols_A; i++) {
         demo_mat_A[i] = randomFloat(-1.0f, 1.0f);
     }
@@ -170,18 +171,22 @@ int main() {
     ggml_backend_cpu_set_n_threads(backend, 1);
     printf("sleep for 1s to settle\n");
     emscripten_sleep(1000);
-    run(GGML_TYPE_F32, GGML_TYPE_F32);
-    //run(GGML_TYPE_F16, GGML_TYPE_F32);
+    for (; SEED < 45; SEED++) {
+        run(GGML_TYPE_F32, GGML_TYPE_F32);
+        //run(GGML_TYPE_F16, GGML_TYPE_F32);
 
-    //run(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0);
-    //run(GGML_TYPE_Q5_0, GGML_TYPE_Q8_0);
-    //run(GGML_TYPE_Q4_0, GGML_TYPE_Q8_0);
+        //run(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0);
+        //run(GGML_TYPE_Q5_0, GGML_TYPE_Q8_0);
+        //run(GGML_TYPE_Q4_0, GGML_TYPE_Q8_0);
 
-    run(GGML_TYPE_Q6_K, GGML_TYPE_Q8_K);
-    run(GGML_TYPE_Q5_K, GGML_TYPE_Q8_K);
-    run(GGML_TYPE_Q4_K, GGML_TYPE_Q8_K);
-    run(GGML_TYPE_Q3_K, GGML_TYPE_Q8_K);
-    run(GGML_TYPE_Q2_K, GGML_TYPE_Q8_K);
+        run(GGML_TYPE_Q6_K, GGML_TYPE_Q8_K);
+        run(GGML_TYPE_Q5_K, GGML_TYPE_Q8_K);
+        //run(GGML_TYPE_Q4_K, GGML_TYPE_Q8_K);
+        //run(GGML_TYPE_Q3_K, GGML_TYPE_Q8_K);
+        //run(GGML_TYPE_Q2_K, GGML_TYPE_Q8_K);
+
+        printf("\n\n====================\n\n");
+    }
 
     ggml_backend_free(backend);
 }
