@@ -31,6 +31,9 @@ const int rows_B = 512, cols_B = 256;
 float demo_mat_A[rows_A * cols_A];
 float demo_mat_B[rows_B * cols_B];
 
+float imat_A[rows_A * cols_A];
+float imat_B[rows_B * cols_B];
+
 int SEED = 42;
 void init_demo_data() {
     srand(SEED);
@@ -40,13 +43,19 @@ void init_demo_data() {
     for (int i = 0; i < rows_B * cols_B; i++) {
         demo_mat_B[i] = randomFloat(-1.0f, 1.0f);
     }
+    for (int i = 0; i < rows_A * cols_A; i++) {
+        imat_A[i] = randomFloat(-0.5f, 0.5f);
+    }
+    for (int i = 0; i < rows_B * cols_B; i++) {
+        imat_B[i] = randomFloat(-0.5f, 0.5f);
+    }
 }
 
-void quantize(ggml_type type_out, float * src, float * dst, int nrow, int n_per_row) {
+void quantize(ggml_type type_out, float * src, float * dst, int nrow, int n_per_row, float * imat) {
     //size_t row_size = ggml_row_size(type_out, n_per_row);
     auto type_trait = ggml_get_type_traits_cpu(type_out);
     if (type_out == GGML_TYPE_F16) {
-        ggml_quantize_chunk(type_out, src, dst, 0, nrow, n_per_row, NULL);
+        ggml_quantize_chunk(type_out, src, dst, 0, nrow, n_per_row, imat);
     } else {
         type_trait->from_float(src, dst, (int64_t)nrow*n_per_row);
     }
@@ -74,13 +83,13 @@ struct simple_model {
 
         if (ta != GGML_TYPE_F32) {
             float quant_mat_A[rows_A * cols_A];
-            quantize(ta, demo_mat_A, quant_mat_A, rows_A, cols_A);
+            quantize(ta, demo_mat_A, quant_mat_A, rows_A, cols_A, imat_A);
             memcpy(demo_mat_A, quant_mat_A, sizeof(quant_mat_A));
         }
 
         if (tb != GGML_TYPE_F32) {
             float quant_mat_B[rows_B * cols_B];
-            quantize(tb, demo_mat_B, quant_mat_B, rows_B, cols_B);
+            quantize(tb, demo_mat_B, quant_mat_B, rows_B, cols_B, imat_B);
             memcpy(demo_mat_B, quant_mat_B, sizeof(quant_mat_B));
         }
 
@@ -179,11 +188,20 @@ int main() {
         //run(GGML_TYPE_Q5_0, GGML_TYPE_Q8_0);
         //run(GGML_TYPE_Q4_0, GGML_TYPE_Q8_0);
 
-        run(GGML_TYPE_Q6_K, GGML_TYPE_Q8_K);
-        run(GGML_TYPE_Q5_K, GGML_TYPE_Q8_K);
+        //run(GGML_TYPE_Q6_K, GGML_TYPE_Q8_K);
+        //run(GGML_TYPE_Q5_K, GGML_TYPE_Q8_K);
         //run(GGML_TYPE_Q4_K, GGML_TYPE_Q8_K);
-        //run(GGML_TYPE_Q3_K, GGML_TYPE_Q8_K);
-        //run(GGML_TYPE_Q2_K, GGML_TYPE_Q8_K);
+        run(GGML_TYPE_Q3_K, GGML_TYPE_Q8_K);
+        run(GGML_TYPE_Q2_K, GGML_TYPE_Q8_K);
+
+        // run(GGML_TYPE_IQ4_XS, GGML_TYPE_Q8_K);
+
+        // run(GGML_TYPE_IQ3_S, GGML_TYPE_Q8_K);
+        // run(GGML_TYPE_IQ3_XXS, GGML_TYPE_Q8_K);
+
+        // run(GGML_TYPE_IQ2_S, GGML_TYPE_Q8_K);
+        // run(GGML_TYPE_IQ2_XS, GGML_TYPE_Q8_K);
+        // run(GGML_TYPE_IQ2_XXS, GGML_TYPE_Q8_K);
 
         printf("\n\n====================\n\n");
     }
