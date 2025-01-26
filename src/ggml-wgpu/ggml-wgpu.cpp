@@ -259,7 +259,7 @@ struct ggml_wgpu_buffer_context {
 
     void read_tensor(const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
         size_t offs_in_buf = (size_t)tensor->data - BUF_BASE;
-        LOGD("%s: %s, read from offset %ld\n", label.c_str(), tensor->name, offs_in_buf);
+        LOGT("%s: %s, read from offset %ld\n", label.c_str(), tensor->name, offs_in_buf);
         wgpu::BufferDescriptor descBuf = wgpu::Default;
         {
             descBuf.label = "map_read_buffer";
@@ -280,7 +280,7 @@ struct ggml_wgpu_buffer_context {
         ctx->queue.submit(1, &cmdBuffer);
         bool ready = false;
         auto ret = tmpbuf.mapAsync(wgpu::MapMode::Read, 0, size, [&ready](WGPUBufferMapAsyncStatus status) {
-            printf("buffer_map status=%#.8x\n", status);
+            LOGT("buffer_map status=%#.8x\n", status);
             if (status == WGPUBufferMapAsyncStatus_Success) {
                 ready = true;
             }
