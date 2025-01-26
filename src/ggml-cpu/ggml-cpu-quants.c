@@ -1653,7 +1653,105 @@ static const int8_t kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -1
 //===================================== Q8_K ==============================================
 
 void quantize_row_q8_K(const float * restrict x, void * restrict y, int64_t k) {
+#ifdef __wasm_simd128__
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+    block_q8_K * restrict yc = y; // Cast to proper type
+
+    for (int i = 0; i < nb; i++) {
+        const float * x_block = x + i * QK_K;
+        v128_t amax_vec = wasm_f32x4_splat(0.0f);
+        v128_t max_vec = wasm_f32x4_splat(0.0f);
+
+        // Vectorized max abs value search
+        for (int j = 0; j < QK_K; j += 4) {
+            v128_t x_vec = wasm_v128_load(x_block + j);
+            v128_t abs_x = wasm_f32x4_abs(x_vec);
+            v128_t mask = wasm_f32x4_gt(abs_x, amax_vec);
+            amax_vec = wasm_v128_bitselect(abs_x, amax_vec, mask);
+            max_vec = wasm_v128_bitselect(x_vec, max_vec, mask);
+        }
+
+        // Manual unroll for lane extraction
+        float amax = wasm_f32x4_extract_lane(amax_vec, 0);
+        float max_val = wasm_f32x4_extract_lane(max_vec, 0);
+        #define UPDATE_MAX(lane) \
+            { \
+                float a = wasm_f32x4_extract_lane(amax_vec, lane); \
+                if (a > amax) { \
+                    amax = a; \
+                    max_val = wasm_f32x4_extract_lane(max_vec, lane); \
+                } \
+            }
+        UPDATE_MAX(1)
+        UPDATE_MAX(2)
+        UPDATE_MAX(3)
+        #undef UPDATE_MAX
+
+        if (amax == 0.0f) {
+            yc[i].d = 0.0f;
+            const v128_t zero = wasm_i8x16_splat(0);
+            for (int j = 0; j < QK_K; j += 16) {
+                wasm_v128_store(yc[i].qs + j, zero);
+            }
+            memset(yc[i].bsums, 0, QK_K/16 * sizeof(int));
+            continue;
+        }
+
+        const float iscale = -127.0f / max_val;
+        const v128_t scale_vec = wasm_f32x4_splat(iscale);
+
+        // Process 16 elements per iteration
+        for (int j = 0, jb = 0; j < QK_K; j += 16, jb++) {
+            // Load and quantize 16 floats
+            v128_t x0 = wasm_v128_load(x_block + j);
+            v128_t x1 = wasm_v128_load(x_block + j + 4);
+            v128_t x2 = wasm_v128_load(x_block + j + 8);
+            v128_t x3 = wasm_v128_load(x_block + j + 12);
+
+            v128_t q0 = wasm_f32x4_nearest(wasm_f32x4_mul(x0, scale_vec));
+            v128_t q1 = wasm_f32x4_nearest(wasm_f32x4_mul(x1, scale_vec));
+            v128_t q2 = wasm_f32x4_nearest(wasm_f32x4_mul(x2, scale_vec));
+            v128_t q3 = wasm_f32x4_nearest(wasm_f32x4_mul(x3, scale_vec));
+
+            // Convert to i32 with saturation
+            v128_t i0 = wasm_i32x4_trunc_sat_f32x4(q0);
+            v128_t i1 = wasm_i32x4_trunc_sat_f32x4(q1);
+            v128_t i2 = wasm_i32x4_trunc_sat_f32x4(q2);
+            v128_t i3 = wasm_i32x4_trunc_sat_f32x4(q3);
+
+            // Pack into 16 i8 values
+            v128_t i8 = wasm_i8x16_narrow_i16x8(
+                wasm_i16x8_narrow_i32x4(
+                    wasm_i32x4_min(wasm_i32x4_max(i0, wasm_i32x4_splat(-127)), wasm_i32x4_splat(127)),
+                    wasm_i32x4_min(wasm_i32x4_max(i1, wasm_i32x4_splat(-127)), wasm_i32x4_splat(127))
+                ),
+                wasm_i16x8_narrow_i32x4(
+                    wasm_i32x4_min(wasm_i32x4_max(i2, wasm_i32x4_splat(-127)), wasm_i32x4_splat(127)),
+                    wasm_i32x4_min(wasm_i32x4_max(i3, wasm_i32x4_splat(-127)), wasm_i32x4_splat(127))
+                )
+            );
+            wasm_v128_store(yc[i].qs + j, i8);
+
+            // Calculate bsums using SIMD
+            v128_t sum16 = wasm_i16x8_add(
+                wasm_i16x8_extend_low_i8x16(i8),
+                wasm_i16x8_extend_high_i8x16(i8)
+            );
+            v128_t sum32 = wasm_i32x4_add(
+                wasm_i32x4_extend_low_i16x8(sum16),
+                wasm_i32x4_extend_high_i16x8(sum16)
+            );
+            sum32 = wasm_i32x4_add(sum32, wasm_i32x4_shuffle(sum32, sum32, 2, 3, 0, 1));
+            sum32 = wasm_i32x4_add(sum32, wasm_i32x4_shuffle(sum32, sum32, 1, 0, 3, 2));
+            yc[i].bsums[jb] = wasm_i32x4_extract_lane(sum32, 0);
+        }
+
+        yc[i].d = 1.0f / iscale;
+    }
+#else
     quantize_row_q8_K_ref(x, y, k);
+#endif
 }
 
 //===================================== Dot products =================================
@@ -5356,8 +5454,7 @@ void ggml_vec_dot_q3_K_q8_K(int n, float * restrict s, size_t bs, const void * r
 
     *s = hsum_float_8(acc);
 
-#elif defined(__wasm_simd128__)
-
+#elif defined __wasm_simd128__
     int8_t  aux8[QK_K];
     float   sums[8] = {0};
     uint32_t auxs[4];
@@ -5953,7 +6050,6 @@ void ggml_vec_dot_q4_K_q8_K(int n, float * restrict s, size_t bs, const void * r
     *s = sumf;
 
 #elif defined __wasm_simd128__
-    // WASM SIMD128 implementation
     const uint8_t * scales = (const uint8_t*)&utmp[0];
     float sumf = 0;
 
@@ -6806,8 +6902,7 @@ void ggml_vec_dot_q5_K_q8_K(int n, float * restrict s, size_t bs, const void * r
 
     *s = hsum_float_8(acc) + summs;
 
-#elif defined(__wasm_simd128__)
-    // WASM SIMD implementation
+#elif defined __wasm_simd128__
     //const uint8_t * scales = (const uint8_t*)&utmp[0];
     float sumf = 0;
 
