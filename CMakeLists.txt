@@ -260,3 +260,10 @@ if (GGML_STANDALONE)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ggml.pc
         DESTINATION share/pkgconfig)
 endif()
+
+add_executable(_simd_test "_dev/simd.cpp")
+target_link_libraries(_simd_test PRIVATE ggml)
+target_link_libraries(_simd_test PRIVATE ggml-cpu)
+set_target_properties(_simd_test PROPERTIES SUFFIX ".html")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msimd128")
+target_link_options(_simd_test PRIVATE "-sUSE_GLFW=3" "-sALLOW_MEMORY_GROWTH=1" "-sASYNCIFY=1")
